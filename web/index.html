@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SNES dev</title>
+<style>
+  html, body { margin: 0; background: #111; color: #ddd; font: 14px system-ui, sans-serif; }
+  #bar { display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: #1c1c1c; }
+  #bar button { font: inherit; padding: 4px 10px; }
+  #game { width: 100vw; height: calc(100vh - 40px); }
+</style>
+</head>
+<body>
+<div id="bar">
+  <strong>SNES dev</strong>
+  <button onclick="location.reload()">Reload ROM</button>
+  <span id="status">loading emulator…</span>
+</div>
+<div id="game"></div>
+<script>
+  EJS_player = '#game';
+  EJS_core = 'snes';
+  EJS_gameName = 'superfx';
+  EJS_gameUrl = (new URLSearchParams(location.search).get('rom') || 'rom') + '.sfc?t=' + Date.now();
+  EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
+  EJS_startOnLoaded = true;
+  EJS_backgroundColor = '#111';
+  EJS_volume = 0;
+  EJS_ready = () => { document.getElementById('status').textContent = 'ROM loaded'; };
+  EJS_onGameStart = () => { document.getElementById('status').textContent = 'running'; };
+</script>
+<script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
+</body>
+</html>

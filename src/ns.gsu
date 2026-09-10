@@ -1,0 +1,1354 @@
+; ns.gsu -- Super FX 2: Navier-Stokes finite-time blowup, 256x192 16-colour,
+; double buffered. Filled flat-shaded swirl iso-surface (back-face culled,
+; helical spin stripes), perspective + orbiting camera, spiral streamlines,
+; 256 particles, annulus pulse rings, axis and core circle.
+; Similarity variables per the paper: rho = r/sqrt(tau), eta = z/tau^D,
+; log-time steps. Fixed point: rho, eta Q12; theta Q16 turns; see tools/nsmodel.py.
+
+; ---- cartridge RAM bank $70 ----
+FB0      = $0000    ; 24 KB framebuffer A (32 columns x 24 tiles x 32 bytes)
+FB1      = $6000    ; 24 KB framebuffer B
+SIN      = $C000
+ATAB     = $C200
+BTAB     = $C400
+GTAB     = $C600
+GPTAB    = $C800
+OMTAB    = $CA00
+AMPTAB   = $CC00    ; 32 words
+RECIP2   = $CD00    ; 256 words, perspective
+RECIP8   = $CF00    ; 256 words, 128/dy (edge slopes in Q7)
+SHADE    = $D100    ; 256 bytes
+TUBE     = $D200    ; 14 x (eta, rho)
+SCALE_R  = $D300    ; Q10
+SCALE_Z  = $D302    ; Q10
+OMF      = $D304    ; Q14 tau^-h
+FRAME    = $D306
+SEED     = $D308
+SPAWN    = $D30A
+PULSE_CD = $D30C
+FRAMES   = $D30E
+CAM      = $D310    ; camera azimuth Q16 (SNES advances it)
+SPIN     = $D312    ; tube spin Q16 (GSU advances it)
+FBASE    = $D314    ; framebuffer to draw into (0 or $6000)
+PART     = $D400    ; 256 x (rho, theta, eta)
+PULSES   = $DA00    ; 4 x (rho_p, eta_p, sigma, theta0, phase, age)
+VERTS    = $DB00    ; 14 x 12 x (sx, sy)
+; scratch
+V_PX     = $DE00
+V_PY     = $DE02
+V_I      = $DE04
+V_J      = $DE06
+V_SLOT   = $DE08
+V_A      = $DE0A
+V_SIG    = $DE0C
+V_TMP    = $DE0E
+V_CNT    = $DE10
+V_K      = $DE12
+T_X0     = $DE20
+T_Y0     = $DE22
+T_X1     = $DE24
+T_Y1     = $DE26
+T_X2     = $DE28
+T_Y2     = $DE2A
+T_DB2    = $DE2C
+T_X1Q    = $DE2E
+T_XA     = $DE30
+T_XB     = $DE32
+S_RHO    = $DE40
+S_TH     = $DE42
+S_ETA    = $DE44
+V_COL    = $DE46
+V_PTR    = $DE48
+
+NPART    = 256
+RHO_CORE = 11469    ; 2.8 Q12
+SINA     = 28932    ; sin 62 deg Q15
+COSA     = 15383    ; cos 62 deg Q15
+ETA_C    = 1008     ; D * ds in Q16 (ds = 1/32)
+CX       = 128
+CY       = 96
+
+        .org $8000
+main:
+        cache
+        ibt r0,#0
+        ramb
+        ibt r0,#0
+        cmode
+        ; ---- clear the draw buffer (12288 words) ----
+        lm r1,(FBASE)
+        iwt r12,#12288
+        iwt r13,#clr
+        ibt r0,#0
+clr:    stw (r1)
+        inc r1
+        loop
+        inc r1
+        ; ---- tube spin advances with the swirl at rho = 2 ----
+        iwt r0,#OMTAB + 128
+        to r0
+        ldw (r0)
+        lm r6,(OMF)
+        fmult
+        add r0
+        add r0
+        lm r4,(SPIN)
+        add r4
+        sm (SPIN),r0
+
+; ================= axis (colour 12) =================
+        ibt r0,#12
+        color
+        iwt r7,#-12288          ; eta = -3
+        ibt r3,#0
+        ibt r5,#0
+        iwt r0,#97
+        sm (V_CNT),r0
+axis_l:
+        iwt r13,#proj
+        link #2
+        jmp r13
+        nop
+        iwt r13,#plot_clip
+        link #2
+        jmp r13
+        nop
+        iwt r0,#256
+        with r7
+        add r0
+        lm r0,(V_CNT)
+        dec r0
+        sm (V_CNT),r0
+        bne axis_l
+        nop
+
+; ================= tube: project the 14 x 12 vertex grid =================
+        iwt r8,#VERTS
+        iwt r9,#TUBE
+        ibt r0,#0
+        sm (V_J),r0
+tv_ring:
+        to r7
+        ldw (r9)                ; eta
+        inc r9
+        inc r9
+        to r3
+        ldw (r9)                ; rho
+        inc r9
+        inc r9
+        sm (V_TMP),r9
+        lm r5,(SPIN)
+        ibt r0,#12
+        sm (V_K),r0
+tv_seg:
+        sm (V_PX),r3
+        sm (V_PY),r7
+        sm (V_A),r5
+        sm (V_PTR),r8
+        iwt r13,#proj
+        link #2
+        jmp r13
+        nop
+        lm r8,(V_PTR)
+        from r1
+        stw (r8)
+        inc r8
+        inc r8
+        from r2
+        stw (r8)
+        inc r8
+        inc r8
+        lm r3,(V_PX)
+        lm r7,(V_PY)
+        lm r5,(V_A)
+        iwt r0,#5461
+        with r5
+        add r0                  ; next segment (1/12 turn)
+        lm r0,(V_K)
+        dec r0
+        sm (V_K),r0
+        bne tv_seg
+        nop
+        lm r9,(V_TMP)
+        lm r0,(V_J)
+        inc r0
+        sm (V_J),r0
+        iwt r4,#14
+        cmp r4
+        bne tv_ring
+        nop
+
+; ================= tube: fill the quads =================
+        ibt r0,#0
+        sm (V_J),r0
+tq_ring:
+        ibt r0,#0
+        sm (V_K),r0
+tq_seg:
+        ; A = v(j,k) B = v(j,k+1) C = v(j+1,k) D = v(j+1,k+1)
+        lm r0,(V_J)
+        iwt r6,#48
+        lmult                   ; r4 = j*48
+        lm r0,(V_K)
+        add r0
+        add r0                  ; k*4
+        add r4
+        iwt r4,#VERTS
+        add r4
+        move r8,r0              ; r8 -> A
+        lm r0,(V_K)
+        iwt r4,#11
+        cmp r4
+        bne tq_nowrap
+        nop
+        iwt r0,#-44             ; B = A - 44 when k = 11 (wrap to k = 0)
+        bra tq_bset
+        nop
+tq_nowrap:
+        ibt r0,#4
+tq_bset:
+        add r8
+        move r9,r0              ; r9 -> B
+        iwt r0,#48
+        add r8
+        move r10,r0             ; r10 -> C
+        iwt r0,#48
+        add r9
+        sm (V_PTR),r0           ; D pointer
+        ; cull: cross = (Bx-Ax)*(Cy-Ay) - (Cx-Ax)*(By-Ay)  (all small)
+        to r3
+        ldw (r9)
+        to r0
+        ldw (r8)
+        with r3
+        sub r0                  ; r3 = Bx-Ax
+        inc r10
+        inc r10
+        to r5
+        ldw (r10)               ; Cy
+        dec r10
+        dec r10
+        inc r8
+        inc r8
+        to r0
+        ldw (r8)                ; Ay
+        dec r8
+        dec r8
+        with r5
+        sub r0                  ; r5 = Cy-Ay
+        from r3
+        mult r5
+        move r7,r0              ; r7 = (Bx-Ax)(Cy-Ay)
+        to r3
+        ldw (r10)               ; Cx
+        to r0
+        ldw (r8)                ; Ax
+        with r3
+        sub r0                  ; r3 = Cx-Ax
+        inc r9
+        inc r9
+        to r5
+        ldw (r9)                ; By
+        dec r9
+        dec r9
+        inc r8
+        inc r8
+        to r0
+        ldw (r8)                ; Ay
+        dec r8
+        dec r8
+        with r5
+        sub r0                  ; r5 = By-Ay
+        from r3
+        mult r5
+        with r7
+        sub r0                  ; cross
+        bpl tq_front
+        nop
+        iwt r13,#tq_next        ; back face
+        jmp r13
+        nop
+tq_front:
+        ; colour: shade by view azimuth of the segment + helix stripe
+        lm r0,(V_K)
+        iwt r6,#5461
+        lmult
+        lm r0,(SPIN)
+        add r4
+        iwt r4,#2730            ; half a segment
+        add r4
+        sm (V_TMP),r0           ; segment azimuth (object)
+        lm r4,(CAM)
+        add r4
+        hib
+        iwt r4,#SHADE
+        add r4
+        to r0
+        ldb (r0)
+        move r5,r0              ; base shade 2..9
+        lm r0,(V_TMP)
+        lsr 12
+        lm r4,(V_J)
+        add r4
+        and #1
+        beq tq_col
+        nop
+        dec r5
+        dec r5
+        ibt r0,#2
+        from r5
+        cmp r0
+        bge tq_col
+        nop
+        ibt r5,#2
+tq_col:
+        from r5
+        color
+        ; triangle A B C
+        to r0
+        ldw (r8)
+        sm (T_X0),r0
+        inc r8
+        inc r8
+        to r0
+        ldw (r8)
+        sm (T_Y0),r0
+        to r0
+        ldw (r9)
+        sm (T_X1),r0
+        inc r9
+        inc r9
+        to r0
+        ldw (r9)
+        sm (T_Y1),r0
+        to r0
+        ldw (r10)
+        sm (T_X2),r0
+        inc r10
+        inc r10
+        to r0
+        ldw (r10)
+        sm (T_Y2),r0
+        iwt r13,#tri
+        link #2
+        jmp r13
+        nop
+        ; triangle B D C
+        lm r8,(V_PTR)           ; D
+        lm r0,(T_X1)
+        sm (T_X0),r0
+        lm r0,(T_Y1)
+        sm (T_Y0),r0
+        to r0
+        ldw (r8)
+        sm (T_X1),r0
+        inc r8
+        inc r8
+        to r0
+        ldw (r8)
+        sm (T_Y1),r0
+        iwt r13,#tri
+        link #2
+        jmp r13
+        nop
+tq_next:
+        lm r0,(V_K)
+        inc r0
+        sm (V_K),r0
+        iwt r4,#12
+        cmp r4
+        beq tq_ringdone
+        nop
+        iwt r13,#tq_seg
+        jmp r13
+        nop
+tq_ringdone:
+        lm r0,(V_J)
+        inc r0
+        sm (V_J),r0
+        iwt r4,#13
+        cmp r4
+        beq tq_done
+        nop
+        iwt r13,#tq_ring
+        jmp r13
+        nop
+tq_done:
+
+; ================= streamlines (colour 15): 6 seeds, 40 segments =================
+        ibt r0,#15
+        color
+        ibt r0,#0
+        sm (V_J),r0
+sl_seed:
+        iwt r3,#9830            ; rho = 2.4 (inside the stagnation radius)
+        lm r0,(V_J)
+        iwt r6,#10923           ; 1/6 turn
+        lmult
+        lm r0,(SPIN)
+        add r4
+        move r5,r0
+        lm r0,(V_J)
+        and #1
+        beq sl_eta_neg
+        nop
+        iwt r7,#1230            ; eta = +0.3
+        bra sl_go
+        nop
+sl_eta_neg:
+        iwt r7,#-1230
+sl_go:
+        ibt r0,#32
+        sm (V_CNT),r0
+        sm (S_RHO),r3
+        sm (S_TH),r5
+        sm (S_ETA),r7
+        iwt r13,#proj
+        link #2
+        jmp r13
+        nop
+        sm (V_PX),r1
+        sm (V_PY),r2
+sl_step:
+        lm r3,(S_RHO)
+        lm r5,(S_TH)
+        lm r7,(S_ETA)
+        iwt r13,#advect
+        link #2
+        jmp r13
+        nop
+        iwt r13,#advect
+        link #2
+        jmp r13
+        nop
+        sm (S_RHO),r3
+        sm (S_TH),r5
+        sm (S_ETA),r7
+        iwt r13,#proj
+        link #2
+        jmp r13
+        nop
+        move r3,r1
+        move r5,r2
+        lm r1,(V_PX)
+        lm r2,(V_PY)
+        sm (V_PX),r3
+        sm (V_PY),r5
+        iwt r13,#line
+        link #2
+        jmp r13
+        nop
+        lm r0,(V_CNT)
+        dec r0
+        sm (V_CNT),r0
+        bne sl_step
+        nop
+        lm r0,(V_J)
+        inc r0
+        sm (V_J),r0
+        iwt r4,#6
+        cmp r4
+        beq sl_done
+        nop
+        iwt r13,#sl_seed
+        jmp r13
+        nop
+sl_done:
+
+; ================= particles =================
+        iwt r8,#PART
+        iwt r0,#NPART
+        sm (V_CNT),r0
+part_l:
+        to r3
+        ldw (r8)                ; rho
+        inc r8
+        inc r8
+        to r5
+        ldw (r8)                ; theta
+        inc r8
+        inc r8
+        to r7
+        ldw (r8)                ; eta
+        sm (V_PTR),r8
+        iwt r13,#advect
+        link #2
+        jmp r13
+        nop
+        ; bounds -> reseed
+        iwt r0,#24576
+        from r3
+        cmp r0
+        bge to_reseed
+        nop
+        iwt r0,#82
+        from r3
+        cmp r0
+        blt to_reseed
+        nop
+        iwt r0,#12288
+        from r7
+        cmp r0
+        bge to_reseed
+        nop
+        iwt r0,#-12288
+        from r7
+        cmp r0
+        blt to_reseed
+        nop
+        bra part_store
+        nop
+to_reseed:
+        iwt r13,#reseed
+        jmp r13
+        nop
+part_store:
+        lm r8,(V_PTR)
+        from r7
+        stw (r8)
+        dec r8
+        dec r8
+        from r5
+        stw (r8)
+        dec r8
+        dec r8
+        from r3
+        stw (r8)
+        sm (V_PTR),r8           ; record base (rho) for the pointer advance below
+        ; colour by radius
+        ibt r0,#13
+        iwt r4,#RHO_CORE
+        from r3
+        cmp r4
+        blt part_col
+        nop
+        ibt r0,#14
+part_col:
+        color
+        iwt r13,#proj
+        link #2
+        jmp r13
+        nop
+        iwt r13,#plot_clip
+        link #2
+        jmp r13
+        nop
+        inc r1
+        iwt r13,#plot_clip      ; 2 px wide
+        link #2
+        jmp r13
+        nop
+        lm r8,(V_PTR)
+        iwt r0,#6
+        with r8
+        add r0
+        lm r0,(V_CNT)
+        dec r0
+        sm (V_CNT),r0
+        beq part_end
+        nop
+        iwt r13,#part_l
+        jmp r13
+        nop
+part_end:
+        iwt r13,#pulses
+        jmp r13
+        nop
+
+reseed:
+        iwt r13,#rng
+        link #2
+        jmp r13
+        nop
+        iwt r4,#$3FFF
+        and r4
+        iwt r4,#819
+        add r4
+        move r3,r0              ; rho in [0.2, 4.2)
+        iwt r13,#rng
+        link #2
+        jmp r13
+        nop
+        move r5,r0              ; theta
+        iwt r13,#rng
+        link #2
+        jmp r13
+        nop
+        iwt r4,#$3FFF
+        and r4
+        iwt r4,#-8192
+        add r4
+        move r7,r0              ; eta in [-2, 2)
+        iwt r13,#part_store
+        jmp r13
+        nop
+
+; rng: r0 = SEED = SEED*25173 + 13849 (clobbers r4, r6)
+rng:
+        lm r0,(SEED)
+        iwt r6,#25173
+        lmult
+        iwt r6,#13849
+        from r4
+        add r6
+        sm (SEED),r0
+        jmp r11
+        nop
+
+; ---- advect: one log-time step ds for (r3 rho, r5 theta, r7 eta). clobbers r0,r4,r6,r9,r10 ----
+advect:
+        from r3
+        lsr 6
+        bic #1
+        move r9,r0              ; rho index*2
+        iwt r0,#$4000
+        add r7
+        lsr 6
+        bic #1
+        move r10,r0             ; eta index*2
+        iwt r0,#ATAB
+        add r9
+        to r6
+        ldw (r0)
+        iwt r0,#GPTAB
+        add r10
+        ldw (r0)
+        fmult
+        asr
+        move r4,r0
+        from r3
+        asr 6                   ; rho/2 * ds (ds = 1/32)
+        sub r4
+        with r3
+        add r0
+        iwt r0,#BTAB
+        add r9
+        to r6
+        ldw (r0)
+        iwt r0,#GTAB
+        add r10
+        ldw (r0)
+        fmult
+        asr
+        move r4,r0
+        iwt r6,#ETA_C
+        from r7
+        fmult
+        add r4
+        with r7
+        add r0
+        iwt r0,#OMTAB
+        add r9
+        ldw (r0)
+        lm r6,(OMF)
+        fmult
+        add r0
+        add r0
+        with r5
+        add r0
+        jmp r11
+        nop
+
+; ================= pulses =================
+pulses:
+        lm r0,(PULSE_CD)
+        dec r0
+        sm (PULSE_CD),r0
+        bne pulse_update
+        nop
+        iwt r0,#12
+        sm (PULSE_CD),r0
+        lm r0,(SPAWN)
+        move r9,r0
+        inc r0
+        sm (SPAWN),r0
+        from r9
+        and #3
+        add r0
+        add r0
+        move r8,r0
+        add r0
+        add r8
+        iwt r8,#PULSES
+        add r8
+        move r8,r0
+        from r9
+        and #1
+        beq spawn_a
+        nop
+        iwt r0,#15155           ; rho_p = 3.7
+        stw (r8)
+        inc r8
+        inc r8
+        iwt r0,#-4096
+        bra spawn_eta
+        nop
+spawn_a:
+        iwt r0,#13107           ; rho_p = 3.2
+        stw (r8)
+        inc r8
+        inc r8
+        iwt r0,#4096
+spawn_eta:
+        sm (V_SIG),r0
+        from r9
+        and #2
+        beq spawn_lo
+        nop
+        iwt r0,#2867
+        bra spawn_w
+        nop
+spawn_lo:
+        iwt r0,#-2867
+spawn_w:
+        stw (r8)
+        inc r8
+        inc r8
+        lm r0,(V_SIG)
+        stw (r8)
+        inc r8
+        inc r8
+        iwt r13,#rng
+        link #2
+        jmp r13
+        nop
+        stw (r8)
+        inc r8
+        inc r8
+        ibt r0,#0
+        stw (r8)
+        inc r8
+        inc r8
+        stw (r8)
+
+pulse_update:
+        iwt r8,#PULSES
+        ibt r0,#4
+        sm (V_CNT),r0
+pu_l:
+        sm (V_SLOT),r8
+        iwt r0,#10
+        add r8
+        move r9,r0
+        to r0
+        ldw (r9)
+        iwt r4,#32
+        cmp r4
+        blt pu_active
+        nop
+        iwt r13,#pu_next
+        jmp r13
+        nop
+pu_active:
+        inc r0
+        stw (r9)
+        dec r9
+        dec r9
+        to r0
+        ldw (r9)
+        iwt r4,#2622
+        add r4
+        stw (r9)
+        to r3
+        ldw (r8)
+        from r3
+        lsr 6
+        bic #1
+        iwt r4,#OMTAB
+        add r4
+        ldw (r0)
+        lm r6,(OMF)
+        fmult
+        add r0
+        add r0
+        move r10,r0
+        dec r9
+        dec r9
+        to r0
+        ldw (r9)
+        add r10
+        stw (r9)
+        iwt r0,#10
+        add r8
+        to r0
+        ldw (r0)
+        add r0
+        iwt r4,#AMPTAB
+        add r4
+        to r0
+        ldw (r0)
+        sm (V_A),r0
+        iwt r0,#4
+        add r8
+        to r0
+        ldw (r0)
+        sm (V_SIG),r0
+        ibt r4,#10
+        with r0
+        add #0
+        bpl pu_col
+        nop
+        ibt r4,#11
+pu_col:
+        from r4
+        color
+        ibt r0,#0
+        sm (V_I),r0
+pr_l:
+        lm r8,(V_SLOT)
+        lm r0,(V_I)
+        iwt r6,#2048
+        lmult
+        move r10,r4
+        iwt r0,#6
+        add r8
+        to r0
+        ldw (r0)
+        add r10
+        move r5,r0              ; t
+        add r0
+        add r0
+        add r5
+        add r5                  ; 6t
+        iwt r4,#8
+        with r4
+        add r8
+        to r4
+        ldw (r4)
+        add r4                  ; 6t + phase
+        move r10,r0
+        from r10
+        hib
+        add r0
+        iwt r4,#SIN
+        add r4
+        to r6
+        ldw (r0)
+        lm r0,(V_A)
+        fmult
+        add r0
+        to r3
+        ldw (r8)
+        with r3
+        add r0
+        iwt r0,#$4000
+        add r10
+        hib
+        add r0
+        iwt r4,#SIN
+        add r4
+        to r6
+        ldw (r0)
+        lm r0,(V_A)
+        fmult
+        lm r4,(V_SIG)
+        with r4
+        add #0
+        bpl pr_pos
+        nop
+        with r0
+        not
+        inc r0
+pr_pos:
+        move r4,r0
+        iwt r0,#2
+        add r8
+        to r7
+        ldw (r0)
+        with r7
+        add r4
+        iwt r13,#proj
+        link #2
+        jmp r13
+        nop
+        lm r0,(V_I)
+        add #0
+        beq pr_first
+        nop
+        move r3,r1
+        move r5,r2
+        lm r1,(V_PX)
+        lm r2,(V_PY)
+        sm (V_PX),r3
+        sm (V_PY),r5
+        iwt r13,#line
+        link #2
+        jmp r13
+        nop
+        bra pr_next
+        nop
+pr_first:
+        sm (V_PX),r1
+        sm (V_PY),r2
+pr_next:
+        lm r0,(V_I)
+        inc r0
+        sm (V_I),r0
+        iwt r4,#33
+        cmp r4
+        beq pr_end
+        nop
+        iwt r13,#pr_l
+        jmp r13
+        nop
+pr_end:
+pu_next:
+        lm r8,(V_SLOT)
+        iwt r0,#12
+        with r8
+        add r0
+        lm r0,(V_CNT)
+        dec r0
+        sm (V_CNT),r0
+        beq pu_end
+        nop
+        iwt r13,#pu_l
+        jmp r13
+        nop
+pu_end:
+
+; ================= core circle at z = 0 (colour 12) =================
+        ibt r0,#12
+        color
+        iwt r3,#RHO_CORE
+        ibt r7,#0
+        ibt r5,#0
+        iwt r0,#33
+        sm (V_CNT),r0
+        ibt r0,#0
+        sm (V_I),r0
+circ_l:
+        iwt r13,#proj
+        link #2
+        jmp r13
+        nop
+        lm r0,(V_I)
+        add #0
+        beq circ_first
+        nop
+        move r3,r1
+        move r5,r2
+        lm r1,(V_PX)
+        lm r2,(V_PY)
+        sm (V_PX),r3
+        sm (V_PY),r5
+        iwt r13,#line
+        link #2
+        jmp r13
+        nop
+        bra circ_next
+        nop
+circ_first:
+        sm (V_PX),r1
+        sm (V_PY),r2
+circ_next:
+        lm r0,(V_I)
+        inc r0
+        sm (V_I),r0
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        move r5,r0              ; theta = i/32 turn
+        iwt r3,#RHO_CORE
+        ibt r7,#0
+        lm r0,(V_CNT)
+        dec r0
+        sm (V_CNT),r0
+        bne circ_l
+        nop
+
+; ================= done =================
+        lm r0,(FRAMES)
+        inc r0
+        sm (FRAMES),r0
+        ibt r1,#0
+        ibt r2,#0
+        rpix
+        stop
+        nop
+
+; ---- proj: (r3 rho Q12, r5 theta Q16, r7 eta Q12) -> r1 = sx, r2 = sy.
+;      orbiting camera (CAM added to theta), tilt, perspective. clobbers r0,r4,r6,r8,r9,r10 ----
+proj:
+        lm r6,(SCALE_R)
+        from r3
+        fmult
+        move r9,r0              ; rs Q6
+        lm r0,(CAM)
+        add r5
+        move r10,r0             ; view azimuth
+        iwt r0,#$4000
+        add r10
+        hib
+        add r0
+        iwt r4,#SIN
+        add r4
+        to r6
+        ldw (r0)                ; cos
+        from r9
+        fmult
+        add r0
+        move r1,r0              ; x Q6
+        from r10
+        hib
+        add r0
+        iwt r4,#SIN
+        add r4
+        to r6
+        ldw (r0)                ; sin
+        from r9
+        fmult
+        add r0
+        move r9,r0              ; y Q6
+        lm r6,(SCALE_Z)
+        from r7
+        fmult
+        move r10,r0             ; z Q6
+        iwt r6,#SINA
+        from r9
+        fmult
+        add r0
+        move r2,r0              ; y sinA
+        iwt r6,#COSA
+        from r10
+        fmult
+        add r0
+        with r2
+        sub r0                  ; yv = y sinA - z cosA (Q6)
+        iwt r6,#COSA
+        from r9
+        fmult
+        add r0
+        move r8,r0              ; y cosA
+        iwt r6,#SINA
+        from r10
+        fmult
+        add r0
+        add r8                  ; depth Q6
+        asr 6
+        iwt r4,#128
+        add r4
+        bpl pj_d0
+        nop
+        ibt r0,#0
+pj_d0:
+        iwt r4,#255
+        cmp r4
+        blt pj_d1
+        nop
+        iwt r0,#255
+pj_d1:
+        add r0
+        iwt r4,#RECIP2
+        add r4
+        to r6
+        ldw (r0)                ; f Q14
+        from r1
+        fmult
+        asr 4
+        iwt r4,#CX
+        add r4
+        move r1,r0
+        from r2
+        fmult
+        asr 4
+        iwt r4,#CY
+        add r4
+        move r2,r0
+        jmp r11
+        nop
+
+; ---- plot_clip: plot (r1,r2) if inside 0..255 x 0..191 ----
+plot_clip:
+        iwt r4,#$FF00
+        from r1
+        and r4
+        bne pc_out
+        nop
+        iwt r4,#192
+        from r2
+        cmp r4
+        bge pc_out
+        nop
+        with r2
+        add #0
+        bmi pc_out
+        nop
+        plot
+        dec r1
+pc_out:
+        jmp r11
+        nop
+
+; ---- line: (r1,r2) -> (r3,r5), Bresenham with clipping; returns via r11 ----
+line:
+        ibt r9,#1
+        from r3
+        to r7
+        sub r1
+        bpl l_dxp
+        nop
+        ibt r9,#-1
+        with r7
+        not
+        inc r7
+l_dxp:
+        ibt r10,#1
+        from r5
+        to r8
+        sub r2
+        bmi l_dyn
+        nop
+        with r8
+        not
+        inc r8
+        bra l_dyd
+        nop
+l_dyn:
+        ibt r10,#-1
+l_dyd:
+        from r7
+        to r12
+        add r8
+l_loop:
+        iwt r4,#$FF00
+        from r1
+        and r4
+        bne l_nop
+        nop
+        iwt r4,#192
+        from r2
+        cmp r4
+        bge l_nop
+        nop
+        with r2
+        add #0
+        bmi l_nop
+        nop
+        plot
+        dec r1
+l_nop:
+        from r1
+        cmp r3
+        bne l_cont
+        nop
+        from r2
+        cmp r5
+        beq l_done
+        nop
+l_cont:
+        from r12
+        add r12
+        cmp r8
+        blt l_skipx
+        nop
+        with r12
+        add r8
+        with r1
+        add r9
+l_skipx:
+        from r7
+        cmp r0
+        blt l_skipy
+        nop
+        with r12
+        add r7
+        with r2
+        add r10
+l_skipy:
+        bra l_loop
+        nop
+l_done:
+        jmp r11
+        nop
+
+; ---- tri: filled triangle T_X0.. with current COLOR. clobbers everything but r11 ----
+tri:
+        lm r1,(T_X0)
+        lm r2,(T_Y0)
+        lm r3,(T_X1)
+        lm r5,(T_Y1)
+        lm r7,(T_X2)
+        lm r8,(T_Y2)
+        ; sort by y: (1,2) (3,5) (7,8)
+        from r5
+        cmp r2
+        bge ts1
+        nop
+        move r0,r1
+        move r1,r3
+        move r3,r0
+        move r0,r2
+        move r2,r5
+        move r5,r0
+ts1:
+        from r8
+        cmp r5
+        bge ts2
+        nop
+        move r0,r3
+        move r3,r7
+        move r7,r0
+        move r0,r5
+        move r5,r8
+        move r8,r0
+ts2:
+        from r5
+        cmp r2
+        bge ts3
+        nop
+        move r0,r1
+        move r1,r3
+        move r3,r0
+        move r0,r2
+        move r2,r5
+        move r5,r0
+ts3:
+        from r8
+        cmp r2
+        bne t_ok
+        nop
+        jmp r11                 ; zero height
+        nop
+t_ok:
+        ; slopes (Q7): da = (x2-x0)*recip8[y2-y0], db = (x1-x0)*recip8[y1-y0], db2 = (x2-x1)*recip8[y2-y1]
+        from r8
+        sub r2
+        add r0
+        iwt r4,#RECIP8
+        add r4
+        to r6
+        ldw (r0)
+        from r7
+        sub r1
+        lmult
+        move r9,r4              ; da
+        from r5
+        sub r2
+        add r0
+        iwt r4,#RECIP8
+        add r4
+        to r6
+        ldw (r0)
+        from r3
+        sub r1
+        lmult
+        move r10,r4             ; db
+        from r8
+        sub r5
+        add r0
+        iwt r4,#RECIP8
+        add r4
+        to r6
+        ldw (r0)
+        from r7
+        sub r3
+        lmult
+        sm (T_DB2),r4
+        ; x1 << 7 for the edge restart (Q7: x up to 255 fits a signed word)
+        move r0,r3
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        sm (T_X1Q),r0
+        ; xa = xb = x0 << 7
+        move r0,r1
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        add r0
+        move r3,r0              ; xa
+        move r7,r0              ; xb
+        sm (T_Y1),r5
+        sm (T_Y2),r8
+        ; r2 = y, r3 = xa, r7 = xb, r9 = da, r10 = db
+t_line:
+        lm r0,(T_Y1)
+        from r2
+        cmp r0
+        bne t_noswitch
+        nop
+        lm r7,(T_X1Q)
+        lm r10,(T_DB2)
+t_noswitch:
+        ; visible scanline?
+        with r2
+        add #0
+        bmi t_advance
+        nop
+        iwt r4,#192
+        from r2
+        cmp r4
+        bge t_advance
+        nop
+        ; xl/xr = min/max(xa, xb) >> 7
+        from r3
+        asr 7
+        move r5,r0
+        from r7
+        asr 7
+        move r8,r0
+        from r8
+        cmp r5
+        bge t_ordered
+        nop
+        move r0,r5
+        move r5,r8
+        move r8,r0
+t_ordered:
+        ; clip to 0..255
+        with r5
+        add #0
+        bpl t_l0
+        nop
+        ibt r5,#0
+t_l0:
+        iwt r4,#255
+        from r8
+        cmp r4
+        blt t_r0
+        nop
+        iwt r8,#255
+t_r0:
+        from r8
+        sub r5
+        bmi t_advance           ; empty span
+        nop
+        inc r0
+        move r12,r0             ; count
+        move r1,r5
+        iwt r13,#t_span
+t_span: plot
+        loop
+        nop
+t_advance:
+        with r3
+        add r9
+        with r7
+        add r10
+        inc r2
+        lm r0,(T_Y2)
+        from r2
+        cmp r0
+        bge t_end
+        nop
+        bra t_line
+        nop
+t_end:
+        jmp r11
+        nop

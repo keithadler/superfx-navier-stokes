@@ -1,0 +1,6 @@
+build/
+web/rom.sfc
+web/cube.sfc
+captures/
+__pycache__/
+.DS_Store

@@ -1,0 +1,320 @@
+; cube.gsu -- Super FX program: rotate a cube, project it, draw the 12 edges
+; into a 128x128 16-color framebuffer in cartridge RAM bank $70.
+; Assembled by tools/gsuasm.py. Branches/jumps have a delay slot (the nop after).
+
+; ---- cartridge RAM map (bank $70) ----
+FB      = $0000     ; framebuffer, 16 columns x 512 bytes
+SINTAB  = $2000     ; 256 words, 1.0 = 32767
+RECIP   = $2200     ; 128 words: 16384*D/(z+D), index (z+64)*2
+VERTS   = $2300     ; 8 x (x,y,z) words
+EDGES   = $2330     ; 12 x (a,b) bytes
+POINTS  = $2350     ; 8 x (sx,sy) words
+ANG_A   = $2380
+ANG_B   = $2382
+FRAMES  = $2384
+SIN_A   = $2386
+COS_A   = $2388
+SIN_B   = $238A
+COS_B   = $238C
+EPTR    = $238E
+ECNT    = $2390
+
+        .org $8000
+main:
+        cache
+        ibt r0,#0
+        ramb                    ; RAM bank 0 ($70)
+        ibt r0,#0
+        cmode                   ; plain plotting, no dither
+
+; ---- clear framebuffer: 4096 words ----
+        iwt r1,#FB
+        iwt r12,#4096
+        iwt r13,#clr
+        ibt r0,#0
+clr:    stw (r1)
+        inc r1
+        loop
+        inc r1                  ; delay slot
+
+; ---- sin/cos of both angles ----
+        lm r0,(ANG_A)
+        iwt r13,#sincos
+        link #2
+        jmp r13
+        nop
+        sm (SIN_A),r5
+        sm (COS_A),r7
+        lm r0,(ANG_B)
+        iwt r13,#sincos
+        link #2
+        jmp r13
+        nop
+        sm (SIN_B),r5
+        sm (COS_B),r7
+
+; ---- rotate + project 8 vertices ----
+        iwt r8,#VERTS
+        iwt r9,#POINTS
+        iwt r12,#8
+        iwt r13,#vloop
+vloop:
+        to r3
+        ldw (r8)                ; x
+        inc r8
+        inc r8
+        to r5
+        ldw (r8)                ; y
+        inc r8
+        inc r8
+        to r7
+        ldw (r8)                ; z
+        inc r8
+        inc r8
+        ; x1 = x*cosA + z*sinA      (fmult gives a*b/2 with 1.0 = 32767)
+        lm r6,(COS_A)
+        from r3
+        to r10
+        fmult
+        lm r6,(SIN_A)
+        from r7
+        fmult
+        with r10
+        add r0
+        with r10
+        add r10                 ; r10 = x1
+        ; z1 = z*cosA - x*sinA
+        lm r6,(COS_A)
+        from r7
+        to r7
+        fmult
+        lm r6,(SIN_A)
+        from r3
+        fmult
+        with r7
+        sub r0
+        with r7
+        add r7                  ; r7 = z1
+        ; y2 = y*cosB - z1*sinB
+        lm r6,(COS_B)
+        from r5
+        to r3
+        fmult
+        lm r6,(SIN_B)
+        from r7
+        fmult
+        with r3
+        sub r0
+        with r3
+        add r3                  ; r3 = y2
+        ; z2 = y*sinB + z1*cosB
+        lm r6,(SIN_B)
+        from r5
+        to r5
+        fmult
+        lm r6,(COS_B)
+        from r7
+        fmult
+        with r5
+        add r0
+        with r5
+        add r5                  ; r5 = z2 (6 fractional bits)
+        ; perspective factor from z2
+        with r5
+        asr
+        with r5
+        asr
+        with r5
+        asr
+        with r5
+        asr
+        with r5
+        asr
+        with r5
+        asr                     ; r5 = z2 in pixels
+        ibt r0,#64
+        with r5
+        add r0
+        with r5
+        add r5                  ; (z+64)*2
+        iwt r0,#RECIP
+        with r5
+        add r0
+        to r6
+        ldw (r5)                ; r6 = 16384*D/(z+D)
+        ; sx = x1*f/16 -> shift right 4, plus 64
+        from r10
+        fmult
+        asr
+        asr
+        asr
+        asr
+        ibt r7,#64
+        add r7
+        stw (r9)
+        inc r9
+        inc r9
+        from r3
+        fmult
+        asr
+        asr
+        asr
+        asr
+        add r7
+        stw (r9)
+        inc r9
+        loop
+        inc r9                  ; delay slot
+
+; ---- draw the 12 edges ----
+        ibt r0,#15
+        color
+        iwt r0,#EDGES
+        sm (EPTR),r0
+        ibt r0,#12
+        sm (ECNT),r0
+eloop:
+        lm r8,(EPTR)
+        to r0
+        ldb (r8)
+        inc r8
+        add r0
+        add r0                  ; index*4
+        iwt r3,#POINTS
+        add r3
+        to r1
+        ldw (r0)                ; x0
+        inc r0
+        inc r0
+        to r2
+        ldw (r0)                ; y0
+        to r0
+        ldb (r8)
+        inc r8
+        sm (EPTR),r8
+        add r0
+        add r0
+        iwt r3,#POINTS
+        add r3
+        to r3
+        ldw (r0)                ; x1
+        inc r0
+        inc r0
+        to r5
+        ldw (r0)                ; y1
+        iwt r13,#line
+        link #2
+        jmp r13
+        nop
+        lm r0,(ECNT)
+        dec r0
+        sm (ECNT),r0
+        bne eloop
+        nop
+
+; ---- done: bump the frame counter and stop ----
+        lm r0,(FRAMES)
+        inc r0
+        sm (FRAMES),r0
+        ibt r1,#0
+        ibt r2,#0
+        rpix                    ; flush the pixel cache
+        stop
+        nop
+
+; ---- sincos: r0 = angle (0..255) -> r5 = sin, r7 = cos; returns via r11 ----
+sincos:
+        iwt r3,#$00FF
+        and r3
+        to r7
+        add r0                  ; r7 = angle*2 (table offset)
+        iwt r3,#SINTAB
+        with r7
+        add r3
+        to r5
+        ldw (r7)                ; r5 = sin
+        ibt r3,#$40             ; +64 entries = 128 bytes... (we are in byte offsets: 64*2)
+        with r7
+        add r3
+        with r7
+        add r3                  ; r7 += 128
+        iwt r3,#SINTAB+512
+        from r7
+        cmp r3
+        blt sc_ok
+        nop
+        iwt r3,#512
+        with r7
+        sub r3                  ; wrap
+sc_ok:
+        to r7
+        ldw (r7)                ; r7 = cos
+        jmp r11
+        nop
+
+; ---- line: (r1,r2) -> (r3,r5), Bresenham, plots with current COLOR; returns via r11 ----
+line:
+        ibt r9,#1
+        from r3
+        to r7
+        sub r1                  ; r7 = dx
+        bpl l_dxp
+        nop
+        ibt r9,#-1
+        with r7
+        not
+        inc r7                  ; r7 = |dx|
+l_dxp:
+        ibt r10,#1
+        from r5
+        to r8
+        sub r2                  ; r8 = dy
+        bmi l_dyn
+        nop
+        with r8
+        not
+        inc r8                  ; r8 = -|dy|
+        bra l_dyd
+        nop
+l_dyn:
+        ibt r10,#-1
+l_dyd:
+        from r7
+        to r12
+        add r8                  ; r12 = err = dx + dy
+l_loop:
+        plot                    ; pixel (r1,r2); r1++
+        dec r1
+        from r1
+        cmp r3
+        bne l_cont
+        nop
+        from r2
+        cmp r5
+        beq l_done
+        nop
+l_cont:
+        from r12
+        add r12                 ; r0 = 2*err
+        cmp r8                  ; e2 - dy
+        blt l_skipx
+        nop
+        with r12
+        add r8
+        with r1
+        add r9
+l_skipx:
+        from r7
+        cmp r0                  ; dx - e2
+        blt l_skipy
+        nop
+        with r12
+        add r7
+        with r2
+        add r10
+l_skipy:
+        bra l_loop
+        nop
+l_done:
+        jmp r11
+        nop
