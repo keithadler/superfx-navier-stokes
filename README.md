@@ -9,7 +9,12 @@ powered Star Fox — as a filled, shaded, perspective 3D scene at 256x192.
 **Play it in your browser:** https://keithadler.github.io/superfx-navier-stokes/
 (EmulatorJS + snes9x; `?rom=cube` shows the cart spec screen).
 
-![Super FX render](docs/img/ns_mid.png)
+![The cart: GSU-2, 2 MB ROM, 128 KB cart RAM](docs/img/cart.png)
+![The swirl iso-surface early in the collapse](docs/img/ns_mid.png)
+![Later in the collapse: the core has shrunk and the speeds have grown](docs/img/ns_collapse.png)
+
+Video of a full run (spec screen, then several collapses):
+[GitHub release v1.0.0](https://github.com/keithadler/superfx-navier-stokes/releases/tag/v1.0.0).
 
 Everything here was written from scratch in a day: the 65816 SNES side, a
 tiny Super FX assembler in Python, the GSU renderer (filled triangles,

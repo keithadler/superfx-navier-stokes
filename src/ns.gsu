@@ -740,6 +740,7 @@ pu_l:
         jmp r13
         nop
 pu_active:
+        sm (V_K),r0             ; keep the pre-increment age for the amp lookup
         inc r0
         stw (r9)
         dec r9
@@ -768,10 +769,7 @@ pu_active:
         ldw (r9)
         add r10
         stw (r9)
-        iwt r0,#10
-        add r8
-        to r0
-        ldw (r0)
+        lm r0,(V_K)             ; age before this frame's increment: 0..31
         add r0
         iwt r4,#AMPTAB
         add r4
