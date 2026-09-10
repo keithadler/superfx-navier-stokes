@@ -1,5 +1,6 @@
 build/
 web/rom.sfc
+web/rom_*.sfc
 web/cube.sfc
 captures/
 __pycache__/
